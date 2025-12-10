@@ -1,3 +1,6 @@
+# == FULLY OPTIMIZED SCRIPTBLOX DISCORD BOT ==
+# aiohttp • safe JSON saves • game thumbnails • stable API handling
+
 import discord
 import aiohttp
 import asyncio
@@ -12,7 +15,10 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 POSTED_FILE = "posted.json"
-DEFAULT_IMAGE = "https://cdn.discordapp.com/attachments/920731720645500978/1350138518608937081/6794d187-3c79-4a3c-83bb-c9d08e768fa1.webp?ex=693aec7b&is=69399afb&hm=6209616adb80c216a075321117f96dedb73d57d2cae30846c04defe1d42873ae&"
+DEFAULT_IMAGE = (
+    "https://cdn.discordapp.com/attachments/920731720645500978/1350138518608937081/6794d187-3c79-4a3c-83bb-c9d08e768fa1.webp"
+)
+
 API_URL = "https://scriptblox.com/api/script/fetch"
 CHECK_INTERVAL = 10
 MAX_RETRIES = 3
@@ -26,6 +32,10 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
+# ==========================================================
+# SAFE LOAD / SAVE posted.json
+# ==========================================================
+
 def load_posted_ids():
     global posted_ids
     if not os.path.exists(POSTED_FILE):
@@ -35,12 +45,9 @@ def load_posted_ids():
     try:
         with open(POSTED_FILE, "r") as f:
             data = json.load(f)
-            if isinstance(data, list):
-                posted_ids = set(data)
-            else:
-                posted_ids = set()
-    except (json.JSONDecodeError, IOError, ValueError):
-        log("WARN: posted.json corrupted, creating new file")
+        posted_ids = set(data if isinstance(data, list) else [])
+    except Exception:
+        log("WARN: posted.json corrupted → recreating")
         posted_ids = set()
         save_posted_ids()
 
@@ -48,60 +55,71 @@ def load_posted_ids():
 def save_posted_ids():
     temp_path = None
     try:
-        fd, temp_path = tempfile.mkstemp(suffix=".json", dir=".")
+        fd, temp_path = tempfile.mkstemp(suffix=".json")
         with os.fdopen(fd, "w") as f:
             json.dump(list(posted_ids), f, indent=4)
+
         shutil.move(temp_path, POSTED_FILE)
     except Exception as e:
-        log(f"ERROR: Failed to save posted.json: {e}")
+        log(f"ERROR saving posted.json: {e}")
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
 
+# ==========================================================
+# SCRIPT VALIDATION
+# ==========================================================
+
 def script_is_broken(script_data):
-    script = script_data.get("script", "")
+    script = script_data.get("script", "") or ""
     patched = script_data.get("isPatched", False)
 
     if patched:
         return True
 
-    if not script or len(script) < 5:
+    if len(script) < 5:
         return True
 
-    bad_words = ["error", "nil", "invalid", "fail", "patched"]
-    script_lower = script.lower()
-    if any(word in script_lower for word in bad_words):
-        return True
+    banned = ["error", "nil", "invalid", "fail", "patched"]
+    script_low = script.lower()
 
-    return False
+    return any(bad in script_low for bad in banned)
 
+
+# ==========================================================
+# GAME THUMBNAIL & FOOTER ICON
+# ==========================================================
 
 def get_image_url(script_data):
     game = script_data.get("game", {})
-    image_url = game.get("imageUrl", "")
+    image = game.get("imageUrl", "")
 
-    if image_url and not image_url.endswith("no-script.webp"):
-        if image_url.startswith("/"):
-            return f"https://scriptblox.com{image_url}"
-        return image_url
+    if image:
+        if image.startswith("/"):
+            return f"https://scriptblox.com{image}"
+        return image
 
     return DEFAULT_IMAGE
 
 
-def format_date(created):
-    if not created:
+# Timestamp Formatter
+def format_date(ts):
+    if not ts:
         return "Unknown"
     try:
-        dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         return dt.strftime("%b %d, %Y • %I:%M %p")
     except:
         return "Unknown"
 
 
+# ==========================================================
+# HTTP SESSION
+# ==========================================================
+
 async def create_session():
     global http_session
-    timeout = aiohttp.ClientTimeout(total=15)
-    http_session = aiohttp.ClientSession(timeout=timeout)
+    http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
     log("HTTP session created")
 
 
@@ -113,151 +131,146 @@ async def close_session():
         log("HTTP session closed")
 
 
-async def fetch_scripts():
-    global http_session
+# ==========================================================
+# FETCH SCRIPTS (with retry system)
+# ==========================================================
 
+async def fetch_scripts():
     if not http_session:
         await create_session()
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with http_session.get(API_URL) as response:
-                if response.status != 200:
-                    log(f"ERROR: API returned status {response.status}")
-                    if attempt < MAX_RETRIES:
-                        await asyncio.sleep(attempt)
-                        continue
-                    return []
+            async with http_session.get(API_URL) as res:
+                if res.status != 200:
+                    log(f"API status {res.status}")
+                    await asyncio.sleep(attempt)
+                    continue
 
-                data = await response.json()
+                data = await res.json()
                 result = data.get("result", {})
+                return result.get("scripts", [])
 
-                if isinstance(result, dict):
-                    return result.get("scripts", [])
-                return []
-
-        except asyncio.TimeoutError:
-            log(f"ERROR: API request timed out (attempt {attempt}/{MAX_RETRIES})"
-                )
-        except aiohttp.ClientError as e:
-            log(f"ERROR: API connection error: {e} (attempt {attempt}/{MAX_RETRIES})"
-                )
-        except json.JSONDecodeError:
-            log(f"ERROR: Invalid JSON from API (attempt {attempt}/{MAX_RETRIES})"
-                )
         except Exception as e:
-            log(f"ERROR: Unexpected error: {e} (attempt {attempt}/{MAX_RETRIES})"
-                )
-
-        if attempt < MAX_RETRIES:
+            log(f"API error attempt {attempt}/{MAX_RETRIES}: {e}")
             await asyncio.sleep(attempt)
 
-    log("ERROR: All API retry attempts failed")
+    log("API FAILED after retries")
     return []
 
 
-class ScriptButtons(discord.ui.View):
+# ==========================================================
+# DISCORD BUTTONS FOR COPY SCRIPT
+# ==========================================================
 
-    def __init__(self, script_text):
+class ScriptButtons(discord.ui.View):
+    def __init__(self, script_code):
         super().__init__(timeout=None)
-        self.script_text = script_text
+        self.script_code = script_code
 
     @discord.ui.button(label="📋 Copy Script", style=discord.ButtonStyle.green)
-    async def copy_button(self, interaction: discord.Interaction,
-                          button: discord.ui.Button):
-        if len(self.script_text) > 1900:
+    async def copy(self, interaction, button):
+        if len(self.script_code) > 1950:
             await interaction.response.send_message(
-                f"```lua\n{self.script_text[:1900]}\n```\n*(Script truncated, too long for Discord)*",
-                ephemeral=True)
+                f"```lua\n{self.script_code[:1950]}\n```\n*(Script truncated)*",
+                ephemeral=True
+            )
         else:
             await interaction.response.send_message(
-                f"```lua\n{self.script_text}\n```", ephemeral=True)
+                f"```lua\n{self.script_code}\n```",
+                ephemeral=True
+            )
 
 
-async def send_embed(channel, script_data):
-    script_title = script_data.get("title", "Unknown")
-    game_name = script_data.get("game", {}).get("name", "")
-    script = script_data.get("script", "")
-    created = script_data.get("createdAt", None)
+# ==========================================================
+# SEND EMBED
+# ==========================================================
 
-    if not game_name or game_name.strip() == "":
-        game_name = "Unknown Game"
+async def send_embed(channel, script):
+    title = script.get("title", "Unknown Script")
+    game = script.get("game", {}).get("name", "Unknown Game")
+    code = script.get("script", "")
+    created = format_date(script.get("createdAt"))
+    image = get_image_url(script)
 
-    created_str = format_date(created)
-    image_url = get_image_url(script_data)
+    embed = discord.Embed(
+        title=f"🎮 {game} 🎮",
+        description=title,
+        color=0xFF0000
+    )
 
-    embed = discord.Embed(title=f"🎮{game_name}🎮",
-                          description=f"{script_title}",
-                          color=0xFF0000)
+    embed.add_field(name="⌛ Created", value=created, inline=True)
+    embed.add_field(
+        name="📜 Script",
+        value="⬇️ Click **Copy Script** below ⬇️",
+        inline=False
+    )
 
-    embed.add_field(name="⌛Created⌛", value=created_str, inline=True)
-    embed.add_field(name="📜Script📜",
-                    value="⬇️Click on **Copy Script** below⬇️",
-                    inline=False)
-
-    embed.set_thumbnail(url=image_url)
-    embed.set_footer(text="", icon_url=image_url)
-
-    view = ScriptButtons(script)
+    embed.set_thumbnail(url=image)
+    embed.set_footer(text=game, icon_url=image)
 
     try:
-        await channel.send(embed=embed, view=view)
+        await channel.send(embed=embed, view=ScriptButtons(code))
         return True
-    except discord.DiscordException as e:
-        log(f"ERROR: Failed to send embed: {e}")
+    except Exception as e:
+        log(f"ERROR sending embed: {e}")
         return False
 
 
+# ==========================================================
+# MAIN SCRIPT PROCESSING
+# ==========================================================
+
 async def process_scripts():
-    global is_checking, posted_ids
+    global is_checking
 
     if is_checking:
         return
-
     is_checking = True
 
     try:
         channel = client.get_channel(config.CHANNEL_ID)
         if not channel:
-            log("ERROR: Channel not found")
+            log("CHANNEL NOT FOUND")
             return
 
         scripts = await fetch_scripts()
 
         for s in scripts:
-            script_id = s.get("_id")
-
-            if not script_id:
+            sid = s.get("_id")
+            if not sid:
                 continue
 
-            if script_id in posted_ids:
+            if sid in posted_ids:
                 continue
 
             if script_is_broken(s):
-                log(f"INFO: Script {script_id} skipped (broken/patched) - not saved"
-                    )
+                log(f"Skipping broken script {sid}")
                 continue
 
-            success = await send_embed(channel, s)
-
-            if success:
-                log(f"INFO: Posted script: {s.get('title', 'Unknown')}")
-                posted_ids.add(script_id)
+            if await send_embed(channel, s):
+                posted_ids.add(sid)
                 save_posted_ids()
-
+                log(f"Posted {s.get('title','')}")
+            
             await asyncio.sleep(1)
 
     except Exception as e:
-        log(f"ERROR: Error in process_scripts: {e}")
+        log(f"PROCESS ERROR: {e}")
 
     finally:
         is_checking = False
 
 
+# ==========================================================
+# LOOP
+# ==========================================================
+
 async def main_loop():
     await client.wait_until_ready()
     await create_session()
-    log(f"INFO: Starting main loop (checking every {CHECK_INTERVAL}s)")
+
+    log(f"Bot started — checking every {CHECK_INTERVAL}s")
 
     while not client.is_closed():
         await process_scripts()
@@ -266,9 +279,9 @@ async def main_loop():
 
 @client.event
 async def on_ready():
-    log(f"Bot is online: {client.user}")
+    log(f"ONLINE → {client.user}")
     load_posted_ids()
-    log(f"INFO: Loaded {len(posted_ids)} posted script IDs")
+    log(f"Loaded {len(posted_ids)} stored script IDs")
     client.loop.create_task(main_loop())
 
 
@@ -279,9 +292,9 @@ async def on_disconnect():
 
 if __name__ == "__main__":
     if not config.TOKEN:
-        log("ERROR: TOKEN not set in environment")
+        log("TOKEN missing")
     elif not config.CHANNEL_ID:
-        log("ERROR: CHANNEL_ID not set in environment")
+        log("CHANNEL_ID missing")
     else:
         try:
             client.run(config.TOKEN)
