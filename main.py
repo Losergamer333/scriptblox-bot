@@ -9,6 +9,8 @@ import shutil
 from datetime import datetime
 
 intents = discord.Intents.default()
+intents.message_content = True
+
 client = discord.Client(intents=intents)
 
 POSTED_FILE = "posted.json"
