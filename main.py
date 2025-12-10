@@ -12,19 +12,22 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 POSTED_FILE = "posted.json"
-DEFAULT_IMAGE = (
-    "https://cdn.discordapp.com/attachments/920731720645500978/1350138518608937081/6794d187-3c79-4a3c-83bb-c9d08e768fa1.webp"
-)
+DEFAULT_IMAGE = "https://cdn.discordapp.com/attachments/920731720645500978/1350138518608937081/6794d187-3c79-4a3c-83bb-c9d08e768fa1.webp"
 
 API_URL = "https://scriptblox.com/api/script/fetch"
 CHECK_INTERVAL = 10
 MAX_RETRIES = 3
+
+WEBHOOK_URL = config.WEBHOOK_URL  # NEW: ultra fast webhook output
 
 is_checking = False
 posted_ids = set()
 http_session = None
 
 
+# ==========================================================
+# LOGGING
+# ==========================================================
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
@@ -32,7 +35,6 @@ def log(msg):
 # ==========================================================
 # SAFE LOAD / SAVE posted.json
 # ==========================================================
-
 def load_posted_ids():
     global posted_ids
     if not os.path.exists(POSTED_FILE):
@@ -64,17 +66,28 @@ def save_posted_ids():
 
 
 # ==========================================================
+# CLEANUP FOR REMOVED SCRIPTS
+# ==========================================================
+def cleanup_removed_scripts(live_ids):
+    removed = [sid for sid in posted_ids if sid not in live_ids]
+    if not removed:
+        return
+
+    for sid in removed:
+        posted_ids.discard(sid)
+
+    save_posted_ids()
+    log(f"Cleanup: Removed {len(removed)} deleted/old scripts")
+
+
+# ==========================================================
 # SCRIPT VALIDATION
 # ==========================================================
-
 def script_is_broken(script_data):
     script = script_data.get("script", "") or ""
     patched = script_data.get("isPatched", False)
 
-    if patched:
-        return True
-
-    if len(script) < 5:
+    if patched or len(script) < 5:
         return True
 
     banned = ["error", "nil", "invalid", "fail", "patched"]
@@ -84,9 +97,8 @@ def script_is_broken(script_data):
 
 
 # ==========================================================
-# GAME THUMBNAIL & FOOTER ICON
+# GAME THUMBNAIL + FOOTER ICON
 # ==========================================================
-
 def get_image_url(script_data):
     game = script_data.get("game", {})
     image = game.get("imageUrl", "")
@@ -99,7 +111,6 @@ def get_image_url(script_data):
     return DEFAULT_IMAGE
 
 
-# Timestamp Formatter
 def format_date(ts):
     if not ts:
         return "Unknown"
@@ -113,7 +124,6 @@ def format_date(ts):
 # ==========================================================
 # HTTP SESSION
 # ==========================================================
-
 async def create_session():
     global http_session
     http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
@@ -129,9 +139,8 @@ async def close_session():
 
 
 # ==========================================================
-# FETCH SCRIPTS (with retry system)
+# FETCH SCRIPTS (WITH RETRY)
 # ==========================================================
-
 async def fetch_scripts():
     if not http_session:
         await create_session()
@@ -157,67 +166,93 @@ async def fetch_scripts():
 
 
 # ==========================================================
-# DISCORD BUTTONS FOR COPY SCRIPT
+# WEBHOOK ULTRAFAST POSTING
 # ==========================================================
+async def webhook_send(script):
+    if not WEBHOOK_URL:
+        log("Webhook URL missing!")
+        return False
 
-class ScriptButtons(discord.ui.View):
-    def __init__(self, script_code):
-        super().__init__(timeout=None)
-        self.script_code = script_code
-
-    @discord.ui.button(label="📋 Copy Script", style=discord.ButtonStyle.green)
-    async def copy(self, interaction, button):
-        if len(self.script_code) > 1950:
-            await interaction.response.send_message(
-                f"```lua\n{self.script_code[:1950]}\n```\n*(Script truncated)*",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                f"```lua\n{self.script_code}\n```",
-                ephemeral=True
-            )
-
-
-# ==========================================================
-# SEND EMBED
-# ==========================================================
-
-async def send_embed(channel, script):
     title = script.get("title", "Unknown Script")
     game = script.get("game", {}).get("name", "Unknown Game")
     code = script.get("script", "")
     created = format_date(script.get("createdAt"))
     image = get_image_url(script)
 
-    embed = discord.Embed(
-        title=f"🎮 {game} 🎮",
-        description=title,
-        color=0xFF0000
-    )
-
-    embed.add_field(name="⌛ Created", value=created, inline=True)
-    embed.add_field(
-        name="📜 Script",
-        value="⬇️ Click **Copy Script** below ⬇️",
-        inline=False
-    )
-
-    embed.set_thumbnail(url=image)
-    embed.set_footer(text=game, icon_url=image)
+    data = {
+        "embeds": [
+            {
+                "title": f"🎮 {game} 🎮",
+                "description": title,
+                "color": 0xFF0000,
+                "thumbnail": {"url": image},
+                "fields": [
+                    {"name": "⌛ Created", "value": created, "inline": True},
+                    {
+                        "name": "📜 Script",
+                        "value": "⬇️ Click **Copy Script** in Discord ⬇️",
+                        "inline": False
+                    }
+                ],
+                "footer": {"text": game, "icon_url": image}
+            }
+        ],
+        "components": [
+            {
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,
+                        "style": 1,
+                        "label": "📋 Copy Script",
+                        "custom_id": f"copy:{script['_id']}"
+                    }
+                ]
+            }
+        ]
+    }
 
     try:
-        await channel.send(embed=embed, view=ScriptButtons(code))
-        return True
+        async with http_session.post(WEBHOOK_URL, json=data) as res:
+            return res.status in (200, 204)
     except Exception as e:
-        log(f"ERROR sending embed: {e}")
+        log(f"Webhook error: {e}")
         return False
 
 
 # ==========================================================
-# MAIN SCRIPT PROCESSING
+# DISCORD INTERACTION HANDLER FOR COPY SCRIPT
 # ==========================================================
+@client.event
+async def on_interaction(interaction: discord.Interaction):
+    if interaction.type.value != 3:  # Component press
+        return
 
+    custom = interaction.data.get("custom_id", "")
+    if not custom.startswith("copy:"):
+        return
+
+    script_id = custom.split(":")[1]
+
+    try:
+        scripts = await fetch_scripts()
+        for s in scripts:
+            if s.get("_id") == script_id:
+                code = s.get("script", "")
+                await interaction.response.send_message(
+                    f"```lua\n{code[:1950]}\n```",
+                    ephemeral=True
+                )
+                return
+    except:
+        pass
+
+    await interaction.response.send_message("Script not found.", ephemeral=True)
+
+
+# ==========================================================
+# MAIN PROCESSING
+# ==========================================================
 async def process_scripts():
     global is_checking
 
@@ -226,31 +261,27 @@ async def process_scripts():
     is_checking = True
 
     try:
-        channel = client.get_channel(config.CHANNEL_ID)
-        if not channel:
-            log("CHANNEL NOT FOUND")
-            return
-
         scripts = await fetch_scripts()
+
+        live_ids = {s.get("_id") for s in scripts if s.get("_id")}
+
+        # remove deleted
+        cleanup_removed_scripts(live_ids)
 
         for s in scripts:
             sid = s.get("_id")
-            if not sid:
-                continue
-
-            if sid in posted_ids:
+            if not sid or sid in posted_ids:
                 continue
 
             if script_is_broken(s):
-                log(f"Skipping broken script {sid}")
                 continue
 
-            if await send_embed(channel, s):
+            if await webhook_send(s):
                 posted_ids.add(sid)
                 save_posted_ids()
-                log(f"Posted {s.get('title','')}")
-            
-            await asyncio.sleep(1)
+                log(f"Posted {s.get('title', '')}")
+
+            await asyncio.sleep(0.5)
 
     except Exception as e:
         log(f"PROCESS ERROR: {e}")
@@ -262,12 +293,11 @@ async def process_scripts():
 # ==========================================================
 # LOOP
 # ==========================================================
-
 async def main_loop():
     await client.wait_until_ready()
     await create_session()
 
-    log(f"Bot started — checking every {CHECK_INTERVAL}s")
+    log(f"SYSTEM ACTIVE — checking every {CHECK_INTERVAL}s")
 
     while not client.is_closed():
         await process_scripts()
@@ -277,8 +307,18 @@ async def main_loop():
 @client.event
 async def on_ready():
     log(f"ONLINE → {client.user}")
+
+    # ------------------------------------------------------
+    # WATCHING STATUS
+    # ------------------------------------------------------
+    activity = discord.Activity(
+        type=discord.ActivityType.watching,
+        name="ScriptBlox 🔍"
+    )
+    await client.change_presence(activity=activity)
+
     load_posted_ids()
-    log(f"Loaded {len(posted_ids)} stored script IDs")
+    log(f"Loaded {len(posted_ids)} stored scripts")
     client.loop.create_task(main_loop())
 
 
@@ -290,8 +330,6 @@ async def on_disconnect():
 if __name__ == "__main__":
     if not config.TOKEN:
         log("TOKEN missing")
-    elif not config.CHANNEL_ID:
-        log("CHANNEL_ID missing")
     else:
         try:
             client.run(config.TOKEN)
