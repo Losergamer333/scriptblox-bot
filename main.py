@@ -1,6 +1,3 @@
-# == FULLY OPTIMIZED SCRIPTBLOX DISCORD BOT ==
-# aiohttp • safe JSON saves • game thumbnails • stable API handling
-
 import discord
 import aiohttp
 import asyncio
